@@ -213,6 +213,13 @@ function SidebarNavigation({ isCollapsed, containerRef }: { isCollapsed: boolean
                 intent="alert-solid"
             >{missingEpisodeCount}</Badge> : undefined,
         },
+        {
+            id: "novels",
+            iconType: LuBookOpen,
+            name: "Novels",
+            href: "/novels",
+            isCurrent: pathname.startsWith("/novels"),
+        },
         ...serverStatus?.settings?.library?.enableManga ? [{
             id: "manga",
             iconType: LuBookOpen,

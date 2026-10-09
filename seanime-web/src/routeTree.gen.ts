@@ -50,6 +50,7 @@ const MainScanSummariesIndexLazyRouteImport = createFileRoute(
 const MainQbittorrentIndexLazyRouteImport = createFileRoute(
   '/_main/qbittorrent/',
 )()
+const MainNovelsIndexLazyRouteImport = createFileRoute('/_main/novels/')()
 const MainMangaIndexLazyRouteImport = createFileRoute('/_main/manga/')()
 const MainListsIndexLazyRouteImport = createFileRoute('/_main/lists/')()
 const MainDebridIndexLazyRouteImport = createFileRoute('/_main/debrid/')()
@@ -159,6 +160,13 @@ const MainQbittorrentIndexLazyRoute =
   } as any).lazy(() =>
     import('./routes/_main/qbittorrent/index.lazy').then((d) => d.Route),
   )
+const MainNovelsIndexLazyRoute = MainNovelsIndexLazyRouteImport.update({
+  id: '/novels/',
+  path: '/novels/',
+  getParentRoute: () => MainRoute,
+} as any).lazy(() =>
+  import('./routes/_main/novels/index.lazy').then((d) => d.Route),
+)
 const MainMangaIndexLazyRoute = MainMangaIndexLazyRouteImport.update({
   id: '/manga/',
   path: '/manga/',
@@ -333,6 +341,7 @@ export interface FileRoutesByFullPath {
   '/debrid/': typeof MainDebridIndexLazyRoute
   '/lists/': typeof MainListsIndexLazyRoute
   '/manga/': typeof MainMangaIndexLazyRoute
+  '/novels/': typeof MainNovelsIndexLazyRoute
   '/qbittorrent/': typeof MainQbittorrentIndexLazyRoute
   '/scan-summaries/': typeof MainScanSummariesIndexLazyRoute
   '/schedule/': typeof MainScheduleIndexLazyRoute
@@ -370,6 +379,7 @@ export interface FileRoutesByTo {
   '/debrid': typeof MainDebridIndexLazyRoute
   '/lists': typeof MainListsIndexLazyRoute
   '/manga': typeof MainMangaIndexLazyRoute
+  '/novels': typeof MainNovelsIndexLazyRoute
   '/qbittorrent': typeof MainQbittorrentIndexLazyRoute
   '/scan-summaries': typeof MainScanSummariesIndexLazyRoute
   '/schedule': typeof MainScheduleIndexLazyRoute
@@ -409,6 +419,7 @@ export interface FileRoutesById {
   '/_main/debrid/': typeof MainDebridIndexLazyRoute
   '/_main/lists/': typeof MainListsIndexLazyRoute
   '/_main/manga/': typeof MainMangaIndexLazyRoute
+  '/_main/novels/': typeof MainNovelsIndexLazyRoute
   '/_main/qbittorrent/': typeof MainQbittorrentIndexLazyRoute
   '/_main/scan-summaries/': typeof MainScanSummariesIndexLazyRoute
   '/_main/schedule/': typeof MainScheduleIndexLazyRoute
@@ -448,6 +459,7 @@ export interface FileRouteTypes {
     | '/debrid/'
     | '/lists/'
     | '/manga/'
+    | '/novels/'
     | '/qbittorrent/'
     | '/scan-summaries/'
     | '/schedule/'
@@ -485,6 +497,7 @@ export interface FileRouteTypes {
     | '/debrid'
     | '/lists'
     | '/manga'
+    | '/novels'
     | '/qbittorrent'
     | '/scan-summaries'
     | '/schedule'
@@ -523,6 +536,7 @@ export interface FileRouteTypes {
     | '/_main/debrid/'
     | '/_main/lists/'
     | '/_main/manga/'
+    | '/_main/novels/'
     | '/_main/qbittorrent/'
     | '/_main/scan-summaries/'
     | '/_main/schedule/'
@@ -653,6 +667,13 @@ declare module '@tanstack/react-router' {
       path: '/qbittorrent'
       fullPath: '/qbittorrent/'
       preLoaderRoute: typeof MainQbittorrentIndexLazyRouteImport
+      parentRoute: typeof MainRoute
+    }
+    '/_main/novels/': {
+      id: '/_main/novels/'
+      path: '/novels'
+      fullPath: '/novels/'
+      preLoaderRoute: typeof MainNovelsIndexLazyRouteImport
       parentRoute: typeof MainRoute
     }
     '/_main/manga/': {
@@ -822,6 +843,7 @@ interface MainRouteChildren {
   MainDebridIndexLazyRoute: typeof MainDebridIndexLazyRoute
   MainListsIndexLazyRoute: typeof MainListsIndexLazyRoute
   MainMangaIndexLazyRoute: typeof MainMangaIndexLazyRoute
+  MainNovelsIndexLazyRoute: typeof MainNovelsIndexLazyRoute
   MainQbittorrentIndexLazyRoute: typeof MainQbittorrentIndexLazyRoute
   MainScanSummariesIndexLazyRoute: typeof MainScanSummariesIndexLazyRoute
   MainScheduleIndexLazyRoute: typeof MainScheduleIndexLazyRoute
@@ -854,6 +876,7 @@ const MainRouteChildren: MainRouteChildren = {
   MainDebridIndexLazyRoute: MainDebridIndexLazyRoute,
   MainListsIndexLazyRoute: MainListsIndexLazyRoute,
   MainMangaIndexLazyRoute: MainMangaIndexLazyRoute,
+  MainNovelsIndexLazyRoute: MainNovelsIndexLazyRoute,
   MainQbittorrentIndexLazyRoute: MainQbittorrentIndexLazyRoute,
   MainScanSummariesIndexLazyRoute: MainScanSummariesIndexLazyRoute,
   MainScheduleIndexLazyRoute: MainScheduleIndexLazyRoute,
