@@ -2,24 +2,55 @@ import { useGetNovelChapter, useGetNovelChapters, useGetNovelLibrary } from "@/a
 import React, { useEffect, useRef, useState } from "react"
 
 type Pending = { edge: "first" | "last" } | { href: string } | null
+type ThemeName = "dark" | "sepia" | "light"
+
+const THEMES: Record<ThemeName, { bg: string, fg: string, hl: string }> = {
+    dark: { bg: "#111114", fg: "#d6d6d6", hl: "rgba(255,255,255,0.14)" },
+    sepia: { bg: "#f4ecd8", fg: "#4b3a28", hl: "rgba(120,80,20,0.22)" },
+    light: { bg: "#ffffff", fg: "#1c1c1c", hl: "rgba(0,0,0,0.10)" },
+}
 
 const btn = "rounded-md border border-gray-700 px-3 py-1 text-sm hover:bg-gray-800 disabled:opacity-40"
+const selectCls = "rounded-md border border-gray-700 bg-gray-900 px-2 py-1 text-sm text-white"
 
-function loadProgress(series: string): { file: string, href: string } | null {
+function loadSetting(key: string): string | null {
     try {
-        const raw = localStorage.getItem("novels-progress:" + series)
-        return raw ? (JSON.parse(raw) as { file: string, href: string }) : null
+        return localStorage.getItem(key)
     } catch {
         return null
     }
 }
 
-function saveProgress(series: string, file: string, href: string) {
+function saveSetting(key: string, value: string) {
     try {
-        localStorage.setItem("novels-progress:" + series, JSON.stringify({ file, href }))
+        localStorage.setItem(key, value)
     } catch {
         // ignore
     }
+}
+
+function loadProgress(series: string): { file: string, href: string, ratio?: number } | null {
+    try {
+        const raw = localStorage.getItem("novels-progress:" + series)
+        return raw ? (JSON.parse(raw) as { file: string, href: string, ratio?: number }) : null
+    } catch {
+        return null
+    }
+}
+
+function saveProgress(series: string, file: string, href: string, ratio: number) {
+    saveSetting("novels-progress:" + series, JSON.stringify({ file, href, ratio }))
+}
+
+// Finds the element that actually scrolls the page content
+function getScroller(start: HTMLElement | null): HTMLElement {
+    let node = start?.parentElement ?? null
+    while (node) {
+        const oy = getComputedStyle(node).overflowY
+        if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight) return node
+        node = node.parentElement
+    }
+    return (document.scrollingElement as HTMLElement | null) ?? document.documentElement
 }
 
 export default function Page() {
@@ -29,21 +60,170 @@ export default function Page() {
     const [fileIdx, setFileIdx] = useState<number | null>(null)
     const [chapIdx, setChapIdx] = useState<number | null>(null)
     const [pending, setPending] = useState<Pending>(null)
-    const [fontSize, setFontSize] = useState<number>(() => {
-        try {
-            const v = Number(localStorage.getItem("novels-font-size"))
-            return v >= 12 && v <= 40 ? v : 18
-        } catch {
-            return 18
-        }
+
+    const [theme, setTheme] = useState<ThemeName>(() => {
+        const v = loadSetting("novels-theme")
+        return v === "sepia" || v === "light" ? v : "dark"
     })
+    const [fontFamily, setFontFamily] = useState<"sans" | "serif">(() => loadSetting("novels-font-family") === "serif" ? "serif" : "sans")
+    const [fontSize, setFontSize] = useState<number>(() => {
+        const v = Number(loadSetting("novels-font-size"))
+        return v >= 12 && v <= 40 ? v : 18
+    })
+    const [ttsRate, setTtsRate] = useState<number>(() => {
+        const v = Number(loadSetting("novels-tts-rate"))
+        return v >= 0.5 && v <= 3 ? v : 1
+    })
+    const [voiceURI, setVoiceURI] = useState<string>(() => loadSetting("novels-tts-voice") ?? "")
+    const [scrollSpeed, setScrollSpeed] = useState<number>(() => {
+        const v = Number(loadSetting("novels-scroll-speed"))
+        return v >= 10 && v <= 400 ? v : 60
+    })
+    const [showSettings, setShowSettings] = useState(false)
+    const [ttsOn, setTtsOn] = useState(false)
+    const [ttsIdx, setTtsIdx] = useState(0)
+    const [autoScroll, setAutoScroll] = useState(false)
+    const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
+
     const topRef = useRef<HTMLDivElement>(null)
+
+    // These mirror state so speech callbacks never see stale values
+    const ttsOnRef = useRef(false)
+    const ttsRateRef = useRef(ttsRate)
+    const voiceRef = useRef(voiceURI)
+    const scrollSpeedRef = useRef(scrollSpeed)
+    const paragraphsRef = useRef<string[]>([])
+    const speakToken = useRef(0)
+    const autoSpeakRef = useRef(false)
+    const restoreRatioRef = useRef<number | null>(null)
+    const goNextRef = useRef<() => void>(() => undefined)
+    const canNextRef = useRef(false)
 
     const series = library?.find(s => s.name === seriesName)
     const file = series && fileIdx !== null ? series.files[fileIdx]?.filename : undefined
     const { data: chapters } = useGetNovelChapters(file)
     const chapter = chapters && chapIdx !== null ? chapters[chapIdx] : undefined
     const { data: content, isLoading: contentLoading } = useGetNovelChapter(file, chapter?.href)
+
+    paragraphsRef.current = content?.paragraphs ?? []
+    ttsRateRef.current = ttsRate
+    voiceRef.current = voiceURI
+    scrollSpeedRef.current = scrollSpeed
+
+    const canNext = !!series && fileIdx !== null && chapIdx !== null && !!chapters &&
+        (chapIdx < chapters.length - 1 || fileIdx < series.files.length - 1)
+    const canPrev = fileIdx !== null && chapIdx !== null && (chapIdx > 0 || fileIdx > 0)
+    canNextRef.current = canNext
+
+    const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window
+    const inReader = chapIdx !== null
+
+    const stopTts = () => {
+        speakToken.current++
+        ttsOnRef.current = false
+        setTtsOn(false)
+        try {
+            window.speechSynthesis.cancel()
+        } catch {
+            // ignore
+        }
+    }
+
+    const speak = (idx: number) => {
+        const synth = window.speechSynthesis
+        const paras = paragraphsRef.current
+        const token = ++speakToken.current
+        synth.cancel()
+
+        if (idx >= paras.length) {
+            // Chapter finished: continue with the next one if there is one
+            if (canNextRef.current) {
+                autoSpeakRef.current = true
+                goNextRef.current()
+            } else {
+                ttsOnRef.current = false
+                setTtsOn(false)
+            }
+            return
+        }
+
+        ttsOnRef.current = true
+        setTtsOn(true)
+        setTtsIdx(idx)
+        document.getElementById("novel-p-" + idx)?.scrollIntoView({ block: "center", behavior: "smooth" })
+
+        const u = new SpeechSynthesisUtterance(paras[idx])
+        u.rate = ttsRateRef.current
+        const v = synth.getVoices().find(x => x.voiceURI === voiceRef.current)
+        if (v) {
+            u.voice = v
+            u.lang = v.lang
+        }
+        u.onend = () => {
+            if (token === speakToken.current && ttsOnRef.current) speak(idx + 1)
+        }
+        u.onerror = () => {
+            if (token === speakToken.current) {
+                ttsOnRef.current = false
+                setTtsOn(false)
+            }
+        }
+        window.setTimeout(() => {
+            if (token === speakToken.current) synth.speak(u)
+        }, 30)
+    }
+
+    const toggleTts = () => {
+        if (ttsOn) {
+            stopTts()
+        } else if (content && content.paragraphs.length > 0) {
+            speak(ttsIdx)
+        }
+    }
+
+    const goNext = () => {
+        if (!series || fileIdx === null || chapIdx === null || !chapters) return
+        if (chapIdx < chapters.length - 1) {
+            setChapIdx(chapIdx + 1)
+        } else if (fileIdx < series.files.length - 1) {
+            setChapIdx(null)
+            setPending({ edge: "first" })
+            setFileIdx(fileIdx + 1)
+        }
+    }
+    goNextRef.current = goNext
+
+    const goPrev = () => {
+        if (!series || fileIdx === null || chapIdx === null || !chapters) return
+        if (chapIdx > 0) {
+            setChapIdx(chapIdx - 1)
+        } else if (fileIdx > 0) {
+            setChapIdx(null)
+            setPending({ edge: "last" })
+            setFileIdx(fileIdx - 1)
+        }
+    }
+
+    // Load the list of speech voices (browsers fill it in a moment after load)
+    useEffect(() => {
+        if (typeof window === "undefined" || !("speechSynthesis" in window)) return
+        const load = () => setVoices(window.speechSynthesis.getVoices())
+        load()
+        window.speechSynthesis.addEventListener("voiceschanged", load)
+        return () => window.speechSynthesis.removeEventListener("voiceschanged", load)
+    }, [])
+
+    // Stop speaking when leaving the page
+    useEffect(() => {
+        return () => {
+            speakToken.current++
+            try {
+                window.speechSynthesis.cancel()
+            } catch {
+                // ignore
+            }
+        }
+    }, [])
 
     // Once the chapter list of the target file has loaded, jump to the wanted chapter
     useEffect(() => {
@@ -57,36 +237,90 @@ export default function Page() {
         setPending(null)
     }, [pending, chapters])
 
-    // Remember progress and scroll to the top when the chapter changes
+    // When the chapter changes: remember it, go to the top, stop speech (unless it is continuing by itself)
     useEffect(() => {
-        if (seriesName && file && chapter) saveProgress(seriesName, file, chapter.href)
+        if (seriesName && file && chapter) saveProgress(seriesName, file, chapter.href, 0)
+        setTtsIdx(0)
+        if (!autoSpeakRef.current) stopTts()
         topRef.current?.scrollIntoView()
     }, [seriesName, file, chapter?.href])
 
-    const goNext = () => {
-        if (!series || fileIdx === null || chapIdx === null || !chapters) return
-        if (chapIdx < chapters.length - 1) {
-            setChapIdx(chapIdx + 1)
-        } else if (fileIdx < series.files.length - 1) {
-            setChapIdx(null)
-            setPending({ edge: "first" })
-            setFileIdx(fileIdx + 1)
-        }
-    }
+    // Keep reading automatically after moving to the next chapter
+    useEffect(() => {
+        if (!autoSpeakRef.current || !content || content.paragraphs.length === 0) return
+        autoSpeakRef.current = false
+        speak(0)
+    }, [content])
 
-    const goPrev = () => {
-        if (!series || fileIdx === null || chapIdx === null || !chapters) return
-        if (chapIdx > 0) {
-            setChapIdx(chapIdx - 1)
-        } else if (fileIdx > 0) {
-            setChapIdx(null)
-            setPending({ edge: "last" })
-            setFileIdx(fileIdx - 1)
-        }
-    }
+    // Restore the scroll position after "Continue reading"
+    useEffect(() => {
+        if (!content || restoreRatioRef.current === null) return
+        const ratio = restoreRatioRef.current
+        restoreRatioRef.current = null
+        const t = window.setTimeout(() => {
+            const el = getScroller(topRef.current)
+            el.scrollTop = ratio * (el.scrollHeight - el.clientHeight)
+        }, 200)
+        return () => window.clearTimeout(t)
+    }, [content])
 
+    // Save the scroll position inside the chapter
+    useEffect(() => {
+        if (!seriesName || !file || !chapter) return
+        let timer: number | undefined
+        const onScroll = (e: Event) => {
+            const target = e.target
+            const el = target instanceof HTMLElement ? target : ((document.scrollingElement as HTMLElement | null) ?? document.documentElement)
+            if (target instanceof HTMLElement && !target.contains(topRef.current)) return
+            window.clearTimeout(timer)
+            timer = window.setTimeout(() => {
+                const max = el.scrollHeight - el.clientHeight
+                saveProgress(seriesName, file, chapter.href, max > 0 ? el.scrollTop / max : 0)
+            }, 400)
+        }
+        window.addEventListener("scroll", onScroll, true)
+        return () => {
+            window.clearTimeout(timer)
+            window.removeEventListener("scroll", onScroll, true)
+        }
+    }, [seriesName, file, chapter?.href])
+
+    // Auto-scroll
+    useEffect(() => {
+        if (!autoScroll || !inReader) return
+        const el = getScroller(topRef.current)
+        let raf = 0
+        let last = performance.now()
+        let acc = 0
+        const tick = (now: number) => {
+            acc += ((now - last) / 1000) * scrollSpeedRef.current
+            last = now
+            const whole = Math.floor(acc)
+            if (whole > 0) {
+                el.scrollTop += whole
+                acc -= whole
+            }
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) {
+                setAutoScroll(false)
+                return
+            }
+            raf = requestAnimationFrame(tick)
+        }
+        raf = requestAnimationFrame(tick)
+        const stop = () => setAutoScroll(false)
+        window.addEventListener("wheel", stop, { passive: true })
+        window.addEventListener("touchmove", stop, { passive: true })
+        return () => {
+            cancelAnimationFrame(raf)
+            window.removeEventListener("wheel", stop)
+            window.removeEventListener("touchmove", stop)
+        }
+    }, [autoScroll, inReader])
+
+    // Left/right arrow keys change chapter
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
+            if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLInputElement) return
             if (e.key === "ArrowRight") goNext()
             if (e.key === "ArrowLeft") goPrev()
         }
@@ -97,11 +331,7 @@ export default function Page() {
     const changeFont = (delta: number) => {
         const next = Math.min(40, Math.max(12, fontSize + delta))
         setFontSize(next)
-        try {
-            localStorage.setItem("novels-font-size", String(next))
-        } catch {
-            // ignore
-        }
+        saveSetting("novels-font-size", String(next))
     }
 
     const resume = () => {
@@ -110,6 +340,7 @@ export default function Page() {
         if (!p) return
         const idx = series.files.findIndex(f => f.filename === p.file)
         if (idx < 0) return
+        restoreRatioRef.current = typeof p.ratio === "number" ? p.ratio : null
         setPending({ href: p.href })
         setFileIdx(idx)
     }
@@ -218,33 +449,155 @@ export default function Page() {
     // 4. Reader
     if (!chapter) return <div className="p-8 opacity-70">Loading...</div>
 
-    const atStart = fileIdx === 0 && chapIdx === 0
-    const atEnd = !!chapters && fileIdx === series.files.length - 1 && chapIdx === chapters.length - 1
+    const t = THEMES[theme]
+    const englishVoices = voices.filter(v => v.lang.toLowerCase().startsWith("en"))
+    const voiceChoices = englishVoices.length > 0 ? englishVoices : voices
 
     return (
         <div className="p-4 sm:p-8">
             <div ref={topRef} />
             <div className="mx-auto max-w-3xl">
-                <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                <div className="mb-3 flex flex-wrap items-center gap-2">
                     <button className={btn} onClick={() => setChapIdx(null)}>Chapter list</button>
-                    <div className="flex items-center gap-2">
-                        <button className={btn} onClick={() => changeFont(-2)}>A-</button>
-                        <span className="text-sm opacity-70">{fontSize}px</span>
-                        <button className={btn} onClick={() => changeFont(2)}>A+</button>
+                    {ttsSupported && (
+                        <button className={btn + (ttsOn ? " bg-gray-800" : "")} onClick={toggleTts}>
+                            {ttsOn ? "Pause" : "Listen"}
+                        </button>
+                    )}
+                    <button className={btn + (autoScroll ? " bg-gray-800" : "")} onClick={() => setAutoScroll(!autoScroll)}>
+                        {autoScroll ? "Stop scrolling" : "Auto-scroll"}
+                    </button>
+                    <button className={btn + (showSettings ? " bg-gray-800" : "")} onClick={() => setShowSettings(!showSettings)}>
+                        Settings
+                    </button>
+                </div>
+
+                {showSettings && (
+                    <div className="mb-4 space-y-3 rounded-lg border border-gray-800 p-4 text-sm">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="w-28 opacity-70">Theme</span>
+                            {(["dark", "sepia", "light"] as ThemeName[]).map(n => (
+                                <button
+                                    key={n}
+                                    className={btn + (theme === n ? " bg-gray-800" : "")}
+                                    onClick={() => {
+                                        setTheme(n)
+                                        saveSetting("novels-theme", n)
+                                    }}
+                                >
+                                    {n}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="w-28 opacity-70">Font</span>
+                            {(["sans", "serif"] as const).map(n => (
+                                <button
+                                    key={n}
+                                    className={btn + (fontFamily === n ? " bg-gray-800" : "")}
+                                    onClick={() => {
+                                        setFontFamily(n)
+                                        saveSetting("novels-font-family", n)
+                                    }}
+                                >
+                                    {n}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="w-28 opacity-70">Text size</span>
+                            <button className={btn} onClick={() => changeFont(-2)}>A-</button>
+                            <span className="opacity-70">{fontSize}px</span>
+                            <button className={btn} onClick={() => changeFont(2)}>A+</button>
+                        </div>
+                        {ttsSupported && (
+                            <>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="w-28 opacity-70">Voice</span>
+                                    <select
+                                        className={selectCls}
+                                        value={voiceURI}
+                                        onChange={e => {
+                                            setVoiceURI(e.target.value)
+                                            saveSetting("novels-tts-voice", e.target.value)
+                                        }}
+                                    >
+                                        <option value="">Default voice</option>
+                                        {voiceChoices.map(v => (
+                                            <option key={v.voiceURI} value={v.voiceURI}>{v.name} ({v.lang})</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="w-28 opacity-70">Speech speed</span>
+                                    <select
+                                        className={selectCls}
+                                        value={String(ttsRate)}
+                                        onChange={e => {
+                                            setTtsRate(Number(e.target.value))
+                                            saveSetting("novels-tts-rate", e.target.value)
+                                        }}
+                                    >
+                                        {[0.75, 1, 1.25, 1.5, 1.75, 2].map(r => (
+                                            <option key={r} value={String(r)}>{r}x</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </>
+                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                            <span className="w-28 opacity-70">Scroll speed</span>
+                            <input
+                                type="range"
+                                min={10}
+                                max={300}
+                                step={10}
+                                value={scrollSpeed}
+                                onChange={e => {
+                                    setScrollSpeed(Number(e.target.value))
+                                    saveSetting("novels-scroll-speed", e.target.value)
+                                }}
+                            />
+                            <span className="opacity-70">{scrollSpeed} px/s</span>
+                        </div>
+                        {!ttsSupported && (
+                            <p className="opacity-70">Text-to-speech is not available in this browser.</p>
+                        )}
+                    </div>
+                )}
+
+                <div
+                    className="rounded-lg p-6 sm:p-10"
+                    style={{
+                        background: t.bg,
+                        color: t.fg,
+                        fontFamily: fontFamily === "serif" ? "Georgia, 'Times New Roman', serif" : "inherit",
+                    }}
+                >
+                    <h1 className="mb-6 text-2xl font-bold">{content?.title || chapter.title}</h1>
+
+                    {contentLoading && <p className="opacity-70">Loading chapter...</p>}
+
+                    <div className="space-y-2" style={{ fontSize: fontSize, lineHeight: 1.8 }}>
+                        {content?.paragraphs.map((p, i) => (
+                            <p
+                                key={i}
+                                id={"novel-p-" + i}
+                                className="-mx-2 rounded px-2 py-1"
+                                style={ttsOn && ttsIdx === i ? { background: t.hl } : undefined}
+                                onClick={() => {
+                                    if (ttsOn) speak(i)
+                                }}
+                            >
+                                {p}
+                            </p>
+                        ))}
                     </div>
                 </div>
 
-                <h1 className="mb-6 text-2xl font-bold">{content?.title || chapter.title}</h1>
-
-                {contentLoading && <p className="opacity-70">Loading chapter...</p>}
-
-                <div className="space-y-4" style={{ fontSize: fontSize, lineHeight: 1.8 }}>
-                    {content?.paragraphs.map((p, i) => <p key={i}>{p}</p>)}
-                </div>
-
-                <div className="mt-8 flex justify-between">
-                    <button className={btn} onClick={goPrev} disabled={atStart}>Previous</button>
-                    <button className={btn} onClick={goNext} disabled={atEnd}>Next</button>
+                <div className="mt-6 flex justify-between">
+                    <button className={btn} onClick={goPrev} disabled={!canPrev}>Previous</button>
+                    <button className={btn} onClick={goNext} disabled={!canNext}>Next</button>
                 </div>
             </div>
         </div>
