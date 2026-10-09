@@ -384,6 +384,9 @@ func InitRoutes(app *core.App, e *echo.Echo) {
 	// Manga
 	//
 
+	v1Novels := v1.Group("/novels")
+	v1Novels.GET("/library", h.HandleGetNovelLibrary)
+
 	v1Manga := v1.Group("/manga")
 	v1Manga.POST("/anilist/collection", h.HandleGetAnilistMangaCollection)
 	v1Manga.GET("/anilist/collection/raw", h.HandleGetRawAnilistMangaCollection)
